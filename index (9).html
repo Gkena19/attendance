@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attendance</title>
+<style>
+:root{--ink:#14202b;--body:#44525f;--mute:#6b7a89;--line:#c9d2db;--soft:#e6ebf0;--green:#0f6e56;--amber:#b7791f;--red:#b23a3a;--blue:#2f5f9e}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif;color:var(--ink);background:#eef1f4;min-height:100vh}
+main{max-width:440px;margin:0 auto;min-height:100vh;background:#fff;padding:56px 28px 28px;display:flex;flex-direction:column;gap:14px}
+main.wide{max-width:960px}
+h1{font-size:26px;line-height:1.25}
+h2{font-size:18px;margin-top:10px}
+p{font-size:15px;line-height:1.5;color:var(--body)}
+label{display:block;font-size:13px;color:var(--mute)}
+input{display:block;width:100%;margin-top:6px;border:1.5px solid var(--line);border-radius:12px;padding:14px 16px;font-size:16px;color:var(--ink);font-family:inherit}
+input:focus,button:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+button{background:var(--green);color:#fff;border:0;border-radius:12px;padding:15px;font-size:16px;font-weight:600;font-family:inherit;cursor:pointer}
+button.ghost{background:#fff;color:var(--green);border:1.5px solid var(--green)}
+.row{display:flex;gap:10px;align-items:center}
+.row>*{flex:1}
+.err{color:var(--red);font-size:14px;min-height:18px}
+.mute{color:var(--mute);font-size:13px}
+.mid{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:14px}
+.badge{width:96px;height:96px;border-radius:50%;display:flex;align-items:center;justify-content:center}
+.ok{background:var(--green)}.wait{background:var(--amber)}.stop{background:var(--red)}.info{background:var(--blue)}
+.card{border:1.5px solid var(--soft);border-radius:14px;padding:14px 16px;text-align:left;width:100%;cursor:default}
+.card[data-id]{cursor:pointer}
+.card b{display:block;font-size:15px}.card small{font-size:13px;color:var(--mute)}
+#qr img{width:min(70vw,300px);height:auto;image-rendering:pixelated;display:block;margin:0 auto}
+.stat{font-size:30px;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-size:12px;color:var(--mute);padding:8px 6px;border-bottom:1.5px solid var(--line)}
+td{padding:9px 6px;border-bottom:1px solid var(--soft)}
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script>
+// supabase settings (the anon key is public on purpose, row level security protects the data)
+const SB_URL = 'https://evwpewfqoqwskwgwidgb.supabase.co';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV2d3Bld2Zxb3F3c2t3Z3dpZGdiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQwNDc0OTgsImV4cCI6MjEwOTYyMzQ5OH0.txb9KId8HlWSJJElk5pcnOJbumZhXIdG6cZcP6LAa2k';
+const sb = supabase.createClient(SB_URL, SB_KEY);
+
+const $ = s => document.querySelector(s);
+const app = $('#app');
+const q = new URLSearchParams(location.search);
+// student names are typed by students, so always escape before putting them in html
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const show = (html, wide) => { app.className = wide ? 'wide' : ''; app.innerHTML = html; };
+const hm = d => d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+
+const svg = p => `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
+const I = {
+  check: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
+  clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  alert: svg('<path d="M12 6v7.5M12 17.5v.5"/>'),
+  refresh: svg('<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4.5H15"/>')
+};
+function screen(cls, icon, title, msg, extra = '') {
+  show(`<div class="mid"><div class="badge ${cls}">${icon}</div><h1>${esc(title)}</h1><p>${esc(msg)}</p>${extra}</div>`);
+}
+
+/* ---------- student side ---------- */
+async function student() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) {
+    const { error } = await sb.auth.signInAnonymously();
+    if (error) return screen('stop', I.alert, 'Could not start', 'Sign-in failed: ' + error.message);
+  }
+  const { data: me } = await sb.from('students').select('student_id,full_name').maybeSingle();
+  if (!me) return register();
+  if (q.get('s') && q.get('t')) return checkin();
+  screen('ok', I.check, 'You are registered', `${me.full_name} (${me.student_id}). Scan the QR on the screen in the last 10 minutes of class.`);
+}
+
+function register(note = '') {
+  show(`<h1>One last step</h1>
+    <p>Enter your student ID once. After this, you only need to scan the QR code.</p>
+    <label>Student ID<input id="sid" inputmode="numeric" maxlength="8" placeholder="8-digit ID"></label>
+    <label>Full name<input id="nm" placeholder="Your name"></label>
+    <button id="go">Save and continue</button>
+    <p class="err">${esc(note)}</p>`);
+  $('#go').onclick = async () => {
+    const { data, error } = await sb.rpc('register_student', { p_student_id: $('#sid').value, p_full_name: $('#nm').value });
+    const msg = {
+      bad_input: 'Check your ID (8 digits) and your name.',
+      phone_used: 'This phone is already registered.',
+      id_taken: 'That ID is registered on another phone. Ask your lecturer to reset it.'
+    }[data];
+    if (error || msg) return register(error ? error.message : msg);
+    student();
+  };
+}
+
+async function checkin() {
+  const sid = q.get('s');
+  const { data: r, error } = await sb.rpc('check_in', { p_session_id: sid, p_token: q.get('t') });
+  if (error) return screen('stop', I.alert, 'Something went wrong', error.message);
+  const { data: ss } = await sb.from('sessions').select('course_code,lecture_no,class_ends_at').eq('id', sid).maybeSingle();
+  const opens = ss ? hm(new Date(new Date(ss.class_ends_at) - 600000)) : '';
+  const card = ss ? `<div class="card"><b>${esc(ss.course_code)}</b><small>Lecture ${ss.lecture_no}</small></div>` : '';
+  const M = {
+    ok: ['ok', I.check, 'You are in', 'Marked present for this session.'],
+    already: ['ok', I.check, 'Already marked', 'You were already marked present.'],
+    not_open: ['wait', I.clock, opens ? `Check-in opens at ${opens}` : 'Not open yet', 'Check-in is only open for the last 10 minutes of class. Scan again then.'],
+    closed: ['stop', I.alert, 'Check-in is closed', 'The window for this session has ended. If you were in class, tell your lecturer.'],
+    expired: ['info', I.refresh, 'This QR has expired', 'The code on the screen changes every 30 seconds. Scan it again.'],
+    register_first: ['stop', I.alert, 'Register first', 'Open the attendance page without scanning and enter your ID once.'],
+    unknown_session: ['stop', I.alert, 'Unknown session', 'This QR code is not for a valid class.']
+  };
+  const m = M[r] || ['stop', I.alert, 'Unexpected result', String(r)];
+  screen(m[0], m[1], m[2], m[3], card);
+}
+
+/* ---------- lecturer side (open this page with ?view=lecturer) ---------- */
+async function lecturer() {
+  const { data: { session } } = await sb.auth.getSession();
+  const isAdmin = session && !session.user.is_anonymous && (await sb.rpc('is_admin')).data;
+  if (!isAdmin) return login();
+  sessions();
+}
+
+function login(note = '') {
+  show(`<h1>Lecturer sign in</h1>
+    <label>Email<input id="em" type="email"></label>
+    <label>Password<input id="pw" type="password"></label>
+    <button id="go">Sign in</button><p class="err">${esc(note)}</p>`);
+  $('#go').onclick = async () => {
+    const { error } = await sb.auth.signInWithPassword({ email: $('#em').value, password: $('#pw').value });
+    if (error) return login(error.message);
+    lecturer();
+  };
+}
+
+async function sessions(note = '') {
+  const { data: ss } = await sb.from('sessions').select('id,course_code,lecture_no,class_ends_at').order('class_ends_at', { ascending: false }).limit(8);
+  show(`<h1>Lecturer</h1>
+    <div class="row"><label>Course code<input id="c" placeholder="DCIT 214"></label><label>Lecture no<input id="n" type="number"></label></div>
+    <label>Class ends at<input id="e" type="datetime-local"></label>
+    <button id="mk">Create session</button><p class="err">${esc(note)}</p>
+    <h2>Sessions</h2>
+    ${(ss || []).map(s => `<div class="card" data-id="${esc(s.id)}"><b>${esc(s.course_code)} lecture ${esc(s.lecture_no)}</b><small>ends ${esc(new Date(s.class_ends_at).toLocaleString())}</small></div>`).join('') || '<p class="mute">No sessions yet.</p>'}
+    <h2>Reset a phone</h2>
+    <div class="row"><input id="rs" placeholder="Student ID"><button id="rb" class="ghost">Reset</button></div>`);
+  $('#mk').onclick = async () => {
+    const ends = new Date($('#e').value);
+    if (!$('#c').value || !$('#n').value || isNaN(ends)) return sessions('Fill in the course, lecture number and end time.');
+    const { data, error } = await sb.rpc('create_session', { p_course: $('#c').value.trim(), p_lecture: +$('#n').value, p_ends: ends.toISOString() });
+    if (error) return sessions(error.message);
+    live(data);
+  };
+  document.querySelectorAll('.card[data-id]').forEach(c => c.onclick = () => live(c.dataset.id));
+  $('#rb').onclick = async () => {
+    const { data, error } = await sb.rpc('reset_student', { p_student_id: $('#rs').value.trim() });
+    sessions(error ? error.message : data === 'ok' ? 'Phone unlinked. That student can register again.' : 'Could not reset.');
+  };
+}
+
+async function live(id) {
+  const { data: s } = await sb.from('sessions').select('*').eq('id', id).single();
+  const ends = new Date(s.class_ends_at), opens = new Date(ends - 600000);
+  show(`<h1>${esc(s.course_code)} lecture ${esc(s.lecture_no)}</h1>
+    <p id="st"></p>
+    <div id="qr"></div><p class="mute" style="text-align:center">The code changes every 30 seconds</p>
+    <div class="stat" id="cnt">0</div><p class="mute">checked in</p>
+    <div class="row"><input id="hc" type="number" placeholder="Your headcount" value="${esc(s.headcount ?? '')}"><button id="hb">Save</button><button id="ex" class="ghost">Export CSV</button></div>
+    <table><thead><tr><th>Student ID</th><th>Name</th><th>Time</th></tr></thead><tbody id="tb"></tbody></table>
+    <button id="bk" class="ghost">Back</button>`, true);
+  let last = '', rows = [];
+  const tick = async () => {
+    const now = new Date();
+    $('#st').textContent = now < opens ? `Check-in opens at ${hm(opens)}` : now <= ends ? `Check-in is open until ${hm(ends)}` : 'Check-in is closed';
+    const { data: t } = await sb.rpc('get_qr_token', { p_session_id: id });
+    if (t && t !== last) {
+      last = t;
+      const g = qrcode(0, 'M');
+      g.addData(`${location.origin}${location.pathname}?s=${id}&t=${t}`);
+      g.make();
+      $('#qr').innerHTML = `<img src="${g.createDataURL(8, 2)}" alt="QR code to check in">`;
+    }
+    const [{ data: a }, { data: st }] = await Promise.all([
+      sb.from('attendance').select('student_id,scanned_at').eq('session_id', id).order('scanned_at', { ascending: false }),
+      sb.from('students').select('student_id,full_name')
+    ]);
+    const names = Object.fromEntries((st || []).map(x => [x.student_id, x.full_name]));
+    rows = (a || []).map(x => [x.student_id, names[x.student_id] || '', hm(new Date(x.scanned_at))]);
+    $('#cnt').textContent = rows.length;
+    $('#tb').innerHTML = rows.map(r => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td></tr>`).join('');
+  };
+  tick();
+  const iv = setInterval(tick, 5000);
+  $('#bk').onclick = () => { clearInterval(iv); sessions(); };
+  $('#hb').onclick = async () => {
+    await sb.from('sessions').update({ headcount: +$('#hc').value }).eq('id', id);
+    $('#hb').textContent = 'Saved';
+  };
+  $('#ex').onclick = () => {
+    // a leading = + - @ can run as a formula in excel, so neutralise it
+    const cell = v => `"${(/^[=+\-@]/.test(v) ? "'" + v : v).replace(/"/g, '""')}"`;
+    const csv = ['Student ID,Name,Time', ...rows.map(r => r.map(cell).join(','))].join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = `attendance-${s.course_code}-lecture-${s.lecture_no}.csv`.replace(/\s+/g, '-');
+    a.click();
+  };
+}
+
+q.get('view') === 'lecturer' ? lecturer() : student();
+</script>
+</body>
+</html>
